@@ -41,11 +41,11 @@ struct StatusView: View {
                 ForEach(model.appliedRoutes) { r in
                     Text(r.summary).font(.system(.body, design: .monospaced)).textSelection(.enabled)
                 }
-                ForEach(model.routeWarnings, id: \.self) { w in
-                    Label(w, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                ForEach(model.routeWarnings) { w in
+                    Label("\(model.ruleLabel(w.ruleID)): \(w.text)", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
                 }
-                if model.routesPending {
-                    Button("Apply Pending Route Changes") { model.applyNow() }
+                if model.routesNeedAttention {
+                    RouteAttentionBanner()
                 }
                 Button("Show Full Routing Table") {
                     Task {
@@ -58,7 +58,7 @@ struct StatusView: View {
             } header: {
                 Text("Routes added by this app")
             } footer: {
-                Text("Created by “Route via interface” rules. They are removed when the profile is turned off.")
+                Text("Created by rules with an “Out through” interface. They are added when the profile is turned on and removed when it is turned off.")
             }
 
             Section("Network interfaces") {

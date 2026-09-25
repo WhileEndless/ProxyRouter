@@ -28,7 +28,7 @@ enum ProxyKind: String, Codable, CaseIterable, Identifiable {
 }
 
 enum RuleAction: String, Codable, CaseIterable, Identifiable {
-    case proxy, direct, interface
+    case proxy, direct
 
     var id: String { rawValue }
 
@@ -36,7 +36,6 @@ enum RuleAction: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .proxy: "Proxy"
         case .direct: "Direct"
-        case .interface: "Route via interface"
         }
     }
 }
@@ -54,8 +53,19 @@ struct Rule: Codable, Identifiable, Hashable {
     var proxyHost = "127.0.0.1"
     var proxyPort = 8080
     var fallbackDirect = false
-    var interfaceName = ""
-    var gateway = ""
+    /// Network interface the matching traffic leaves through (empty = system default).
+    /// Turned into routes for the targets and, for a remote proxy, for the proxy server.
+    var outInterface = ""
+    /// Next hop for those routes (empty = detected automatically)
+    var outGateway = ""
+
+    var usesInterface: Bool { !outInterface.isEmpty }
+
+    /// true when the proxy server runs on this Mac, so it connects to the targets itself
+    var isLocalProxy: Bool {
+        let h = proxyHost.lowercased()
+        return h == "localhost" || (IPv4.parse(h).map { $0 >> 24 == 127 } ?? false)
+    }
 
     var parsedTargets: [ParsedTarget] { TargetSpec.parseList(targets) }
 
@@ -68,16 +78,16 @@ struct Rule: Codable, Identifiable, Hashable {
     var pacResult: String {
         switch action {
         case .proxy: "\(proxyKind.pacKeyword) \(proxyHost):\(proxyPort)" + (fallbackDirect ? "; DIRECT" : "")
-        case .direct, .interface: "DIRECT"
+        case .direct: "DIRECT"
         }
     }
 
     var actionSummary: String {
-        switch action {
+        let base = switch action {
         case .proxy: "\(proxyKind.label) \(proxyHost):\(proxyPort)"
         case .direct: "DIRECT"
-        case .interface: "route → \(interfaceName.isEmpty ? "?" : interfaceName)" + (gateway.isEmpty ? "" : " via \(gateway)")
         }
+        return base + (usesInterface ? ", out through \(outInterface)" : "")
     }
 }
 
@@ -85,9 +95,23 @@ struct Profile: Codable, Identifiable, Hashable {
     var id = UUID()
     var name: String
     var isActive = false
+    /// Also apply the PAC to whichever network macOS is using at the moment (followed on changes)
+    var followPrimary = true
     /// Network services the PAC is applied to (networksetup names)
     var services: [String] = []
     var rules: [Rule] = []
+    /// Destinations the profile never applies to (same syntax as rule targets)
+    var excludes = ""
+
+    var parsedExcludes: [ParsedTarget] { TargetSpec.parseList(excludes) }
+
+    /// The exclusion that matches the destination, if any
+    func exclusion(host: String, ip: () -> UInt32?) -> TargetSpec? {
+        parsedExcludes.compactMap(\.spec).first { spec in
+            if case .ipRange = spec { return spec.matches(host: host, ip: ip()) }
+            return spec.matches(host: host, ip: nil)
+        }
+    }
 }
 
 struct AppSettings: Codable, Equatable {
@@ -154,12 +178,19 @@ extension Profile {
         self.init(id: c.value(.id, UUID()),
                   name: c.value(.name, "Untitled"),
                   isActive: c.value(.isActive, false),
+                  followPrimary: c.value(.followPrimary, true),
                   services: c.value(.services, []),
-                  rules: c.lenientArray(.rules))
+                  rules: c.lenientArray(.rules),
+                  excludes: c.value(.excludes, ""))
     }
 }
 
 extension Rule {
+    /// Keys written by 0.1.0, where "route via interface" was a separate action
+    private enum LegacyKeys: String, CodingKey {
+        case action, interfaceName, gateway, proxyInterface, proxyGateway
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = Rule()
@@ -167,13 +198,27 @@ extension Rule {
                   enabled: c.value(.enabled, d.enabled),
                   name: c.value(.name, d.name),
                   targets: c.value(.targets, d.targets),
-                  action: c.value(.action, d.action),
+                  action: d.action,
                   proxyKind: c.value(.proxyKind, d.proxyKind),
                   proxyHost: c.value(.proxyHost, d.proxyHost),
                   proxyPort: c.value(.proxyPort, d.proxyPort),
                   fallbackDirect: c.value(.fallbackDirect, d.fallbackDirect),
-                  interfaceName: c.value(.interfaceName, d.interfaceName),
-                  gateway: c.value(.gateway, d.gateway))
+                  outInterface: c.value(.outInterface, d.outInterface),
+                  outGateway: c.value(.outGateway, d.outGateway))
+
+        let legacy = try decoder.container(keyedBy: LegacyKeys.self)
+        let rawAction = legacy.value(.action, "")
+        action = RuleAction(rawValue: rawAction) ?? (rawAction == "interface" ? .direct : d.action)
+        guard !c.contains(.outInterface) else { return }
+        // Old configs: only "interface" rules (and proxy rules with proxyInterface) used an interface;
+        // interfaceName left over on other rules was ignored, so it must not start routing now.
+        if rawAction == "interface" {
+            outInterface = legacy.value(.interfaceName, "")
+            outGateway = legacy.value(.gateway, "")
+        } else if action == .proxy {
+            outInterface = legacy.value(.proxyInterface, "")
+            outGateway = legacy.value(.proxyGateway, "")
+        }
     }
 }
 

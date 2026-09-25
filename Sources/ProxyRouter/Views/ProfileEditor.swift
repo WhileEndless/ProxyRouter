@@ -5,6 +5,7 @@ struct ProfileEditor: View {
     @EnvironmentObject var model: AppModel
     let profileID: UUID
     @State private var showPAC = false
+    @State private var showNetworks = false
 
     var body: some View {
         if let p = model.binding(for: profileID) {
@@ -15,52 +16,36 @@ struct ProfileEditor: View {
     }
 
     private func editor(_ p: Binding<Profile>) -> some View {
-        Form {
+        let profile = p.wrappedValue
+        return Form {
             Section {
-                TextField("Profile name", text: p.name)
+                TextField("Name", text: p.name)
                 Toggle(isOn: Binding(
-                    get: { p.wrappedValue.isActive },
+                    get: { profile.isActive },
                     set: { model.setActive(profileID, $0) }
                 )) {
                     Text("Active")
-                    Text("While active, the rules below are applied to the selected networks.")
+                    Text("Turning the profile on applies its rules; turning it off puts everything back.")
+                }
+                if model.routesNeedAttention(profile) {
+                    RouteAttentionBanner()
                 }
             }
 
             Section {
-                if model.services.isEmpty {
-                    Text("Reading network services…").foregroundStyle(.secondary)
-                }
-                ForEach(model.services) { s in
-                    Toggle(isOn: serviceBinding(p, s.name)) {
-                        HStack(spacing: 6) {
-                            Text(s.name)
-                            if s.isPrimary { Badge("in use", color: .green) }
-                            if !s.enabled { Badge("disabled", color: .gray) }
-                            Spacer()
-                            Text([s.bsdName, s.hardware].filter { !$0.isEmpty }.joined(separator: " · "))
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            } header: {
-                Text("Apply proxy rules to these networks")
-            } footer: {
-                Text("Only the networks you tick are changed; every other network keeps its own settings. macOS follows the proxy settings of the network marked **in use** (the one currently connected to the internet), so tick that one. “Route via interface” rules do not depend on this list.")
-            }
-
-            Section {
-                if p.wrappedValue.rules.isEmpty {
+                if profile.rules.isEmpty {
                     Text("No rules yet. Add one to start sending traffic somewhere.").foregroundStyle(.secondary)
                 }
                 ForEach(p.rules) { $rule in
-                    let idx = p.wrappedValue.rules.firstIndex { $0.id == rule.id } ?? 0
+                    let idx = profile.rules.firstIndex { $0.id == rule.id } ?? 0
                     RuleEditor(
                         rule: $rule,
                         index: idx + 1,
                         interfaces: model.interfaces,
+                        warnings: model.routeWarnings.filter { $0.ruleID == rule.id }.map(\.text),
                         canMoveUp: idx > 0,
-                        canMoveDown: idx < p.wrappedValue.rules.count - 1,
+                        canMoveDown: idx < profile.rules.count - 1,
+                        onRoutingChange: { model.routingChanged(in: profileID) },
                         onMove: { delta in moveRule(rule.id, by: delta) },
                         onDelete: { model.update(profileID) { $0.rules.removeAll { $0.id == rule.id } } }
                     )
@@ -73,11 +58,63 @@ struct ProfileEditor: View {
             } header: {
                 Text("Rules")
             } footer: {
-                Text("Rules are checked from top to bottom and the first match decides. Anything that matches no rule connects directly, as if this app were not running.")
+                Text("Checked from top to bottom; the first matching rule decides. Anything that matches no rule connects directly, as if this app were not running.")
+            }
+
+            Section {
+                TargetListEditor(text: p.excludes, minHeight: 44, placeholder: "e.g. 203.0.113.0/24 or login.example.com")
+            } header: {
+                Text("Exceptions")
+            } footer: {
+                Text("Destinations listed here skip every rule of this profile: they are not proxied and get no routes. They fall through to the next active profile, or connect directly. IP ranges are cut out of the rules' ranges.")
+            }
+
+            Section {
+                Toggle(isOn: p.followPrimary) {
+                    Text("Network in use")
+                    Text(model.primaryService.map { "Currently **\($0.name)**. Follows automatically when you switch between Wi-Fi, Ethernet and other networks." }
+                         ?? "No network is connected right now. The rules are applied as soon as one is.")
+                }
+                if model.services.isEmpty {
+                    Text("Reading network services…").foregroundStyle(.secondary)
+                }
+                DisclosureGroup(isExpanded: $showNetworks) {
+                    ForEach(model.services) { s in
+                        let covered = profile.followPrimary && s.isPrimary
+                        Toggle(isOn: covered ? .constant(true) : serviceBinding(p, s.name)) {
+                            HStack(spacing: 6) {
+                                Text(s.name)
+                                if s.isPrimary { Badge("in use", color: .green) }
+                                if !s.enabled { Badge("disabled", color: .gray) }
+                                Spacer()
+                                Text([s.bsdName, s.hardware].filter { !$0.isEmpty }.joined(separator: " · "))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .disabled(covered)
+                    }
+                } label: {
+                    Text(profile.services.isEmpty ? "Also apply to specific networks" : "Also applied to: \(profile.services.joined(separator: ", "))")
+                }
+                if !profile.followPrimary, profile.rules.contains(where: { $0.enabled && $0.action == .proxy }),
+                   let prim = model.primaryService, !profile.services.contains(prim.name) {
+                    HStack {
+                        Label("macOS is using **\(prim.name)** right now, which is not selected, so the proxy rules have no effect.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button("Use Network in Use") { p.wrappedValue.followPrimary = true }
+                    }
+                }
+            } header: {
+                Text("Proxy settings are applied to")
+            } footer: {
+                Text("macOS only follows the proxy settings of the network it is using, so keep **Network in use** on unless you need something special. This does not choose where traffic leaves the Mac — that is the “Out through” setting of each rule.")
             }
         }
         .formStyle(.grouped)
-        .navigationTitle(p.wrappedValue.name.isEmpty ? "Untitled" : p.wrappedValue.name)
+        .navigationTitle(profile.name.isEmpty ? "Untitled" : profile.name)
         .toolbar {
             ToolbarItem {
                 Button { showPAC = true } label: { Label("Show PAC File", systemImage: "doc.text.magnifyingglass") }
@@ -85,9 +122,9 @@ struct ProfileEditor: View {
             }
         }
         .sheet(isPresented: $showPAC) {
-            TextSheet(title: "PAC file — \(p.wrappedValue.name)",
+            TextSheet(title: "PAC file — \(profile.name)",
                       subtitle: "This is what macOS receives. It is regenerated automatically whenever you edit the profile.",
-                      text: PACGenerator.generate(profiles: [p.wrappedValue], title: p.wrappedValue.name))
+                      text: PACGenerator.generate(profiles: [profile], title: profile.name))
         }
     }
 
@@ -117,20 +154,103 @@ struct RuleEditor: View {
     @Binding var rule: Rule
     let index: Int
     let interfaces: [NetInterface]
+    let warnings: [String]
     let canMoveUp: Bool
     let canMoveDown: Bool
+    /// The rule started or stopped producing routes (interface picked, rule switched on/off)
+    let onRoutingChange: () -> Void
     let onMove: (Int) -> Void
     let onDelete: () -> Void
 
     var body: some View {
-        let parsed = rule.parsedTargets
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("#\(index)").font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 24)
-                Toggle("", isOn: $rule.enabled).labelsHidden().toggleStyle(.switch).controlSize(.small)
-                    .help(rule.enabled ? "Rule is on" : "Rule is off (kept but ignored)")
-                TextField("Rule name (optional)", text: $rule.name)
-                    .textFieldStyle(.roundedBorder)
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 12) {
+                GridRow {
+                    label("Destinations")
+                    TargetListEditor(text: $rule.targets, minHeight: 64,
+                                     placeholder: "198.51.100.0/24, 192.0.2.1-192.0.2.50, *.example.com …")
+                }
+                GridRow {
+                    label("Action")
+                    VStack(alignment: .leading, spacing: 6) {
+                        Picker("Action", selection: $rule.action) {
+                            ForEach(RuleAction.allCases) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.segmented).labelsHidden().fixedSize()
+                        if rule.action == .direct {
+                            caption("Connect without a proxy. Put a Direct rule above a broader rule to make exceptions.")
+                        }
+                    }
+                }
+                if rule.action == .proxy {
+                    GridRow {
+                        label("Proxy server")
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 6) {
+                                Picker("Type", selection: $rule.proxyKind) {
+                                    ForEach(ProxyKind.allCases) { Text($0.label).tag($0) }
+                                }
+                                .labelsHidden().fixedSize()
+                                TextField("Host", text: $rule.proxyHost, prompt: Text("127.0.0.1"))
+                                    .textFieldStyle(.roundedBorder).labelsHidden()
+                                Text(":").foregroundStyle(.secondary)
+                                TextField("Port", value: $rule.proxyPort, format: .number.grouping(.never))
+                                    .textFieldStyle(.roundedBorder).labelsHidden().frame(width: 70)
+                            }
+                            if !rule.isProxyHostValid {
+                                Label("The host or port is not valid, so this rule is skipped.", systemImage: "exclamationmark.triangle.fill")
+                                    .font(.caption).foregroundStyle(.red)
+                            }
+                            Toggle("Connect directly if the proxy is unreachable", isOn: $rule.fallbackDirect)
+                        }
+                    }
+                }
+                GridRow {
+                    label("Out through")
+                    VStack(alignment: .leading, spacing: 6) {
+                        InterfacePicker(selection: $rule.outInterface, interfaces: interfaces)
+                            .labelsHidden().frame(maxWidth: 360, alignment: .leading)
+                        caption(interfaceExplanation)
+                        if rule.usesInterface {
+                            DisclosureGroup(rule.outGateway.isEmpty ? "Gateway: automatic" : "Gateway: \(rule.outGateway)") {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    TextField("Gateway", text: $rule.outGateway, prompt: Text("automatic"))
+                                        .textFieldStyle(.roundedBorder).labelsHidden().frame(width: 180)
+                                    caption("Leave empty: the interface's own router is detected, and VPN tunnels need none. Only fill in if routes go to the wrong router.")
+                                }
+                                .padding(.top, 4)
+                            }
+                            .font(.caption)
+                        }
+                        ForEach(warnings, id: \.self) { w in
+                            Label(w, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption).foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 8)
+        .opacity(rule.enabled ? 1 : 0.5)
+        .onChange(of: rule.outInterface) { onRoutingChange() }
+        .onChange(of: rule.enabled) { if rule.usesInterface { onRoutingChange() } }
+        .onChange(of: rule.action) { if rule.usesInterface { onRoutingChange() } }
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Text("\(index)")
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .frame(minWidth: 20, minHeight: 20)
+                .background(Circle().fill(Color.accentColor.opacity(rule.enabled ? 0.2 : 0.08)))
+            TextField("Rule name", text: $rule.name, prompt: Text("Untitled rule"))
+                .textFieldStyle(.plain).font(.headline)
+            Spacer()
+            Toggle("Enabled", isOn: $rule.enabled).labelsHidden().toggleStyle(.switch).controlSize(.mini)
+                .help(rule.enabled ? "Rule is on" : "Rule is off (kept but ignored)")
+            Group {
                 Button { onMove(-1) } label: { Image(systemName: "chevron.up") }
                     .disabled(!canMoveUp).help("Move up (checked earlier)")
                 Button { onMove(1) } label: { Image(systemName: "chevron.down") }
@@ -139,19 +259,83 @@ struct RuleEditor: View {
                     .help("Delete rule")
             }
             .buttonStyle(.borderless)
+        }
+    }
 
+    private var interfaceExplanation: String {
+        guard rule.usesInterface else {
+            return "Traffic takes the Mac's normal route. Pick an interface (VPN tunnel, second adapter…) to force it out of that one."
+        }
+        let i = rule.outInterface
+        let what: String
+        switch rule.action {
+        case .direct:
+            what = "The destinations above are routed out of \(i)."
+        case .proxy where rule.isLocalProxy:
+            what = "The proxy runs on this Mac, so the destinations above are routed out of \(i) — the proxy's own connections to them leave through \(i)."
+        case .proxy:
+            what = "The proxy server \(rule.proxyHost) and the destinations above are routed out of \(i)."
+        }
+        return what + " Routes are added when the profile is turned on and removed when it is off (administrator password). They affect every app. IPs, ranges and exact host names only — wildcard domains cannot become routes."
+    }
+
+    private func label(_ text: String) -> some View {
+        Text(text).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Shown while the system's routes do not match the rules, until the user applies them
+struct RouteAttentionBanner: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        let refused = model.routeIssue != nil
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(refused ? .red : .orange)
+                .font(.title3)
             VStack(alignment: .leading, spacing: 2) {
-                Text("When the destination is…").font(.subheadline.weight(.medium))
-                Text("One per line. Examples: 142.250.0.0/15 (CIDR) · 216.58.192.0-216.58.223.255 (range) · 8.8.8.8 (single IP) · mail.google.com (exact host) · *.google.com (domain and all subdomains) · *cdn* (wildcard) · * (everything). Text after # is a comment.")
+                Text(refused ? "Routes are not applied" : "Route changes are waiting")
+                    .font(.headline)
+                Text(model.routeIssue ?? "Edits to destinations or gateways are applied when you click Apply, so you are not asked for your password on every keystroke.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            Spacer()
+            Button(refused ? "Try Again" : "Apply Now") { model.applyNow() }
+                .buttonStyle(.borderedProminent)
+                .tint(refused ? .red : .orange)
+                .disabled(model.busy)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill((refused ? Color.red : Color.orange).opacity(0.1)))
+    }
+}
 
-            TextEditor(text: $rule.targets)
+/// Multi-line destination list with inline parse errors and a summary of what was understood
+struct TargetListEditor: View {
+    @Binding var text: String
+    let minHeight: CGFloat
+    var placeholder = ""
+
+    var body: some View {
+        let parsed = TargetSpec.parseList(text)
+        VStack(alignment: .leading, spacing: 6) {
+            TextEditor(text: $text)
                 .font(.system(.body, design: .monospaced))
-                .frame(minHeight: 70)
+                .frame(minHeight: minHeight)
                 .scrollContentBackground(.hidden)
                 .padding(4)
+                .overlay(alignment: .topLeading) {
+                    if text.isEmpty {
+                        Text(placeholder).font(.system(.body, design: .monospaced)).foregroundStyle(.tertiary)
+                            .padding(.horizontal, 9).padding(.vertical, 4).allowsHitTesting(false)
+                    }
+                }
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
 
@@ -163,62 +347,27 @@ struct RuleEditor: View {
             }
             let valid = parsed.compactMap(\.spec)
             if !valid.isEmpty {
-                Text("Understood as: " + valid.map(\.description).joined(separator: "   "))
+                Text(valid.map(\.description).joined(separator: " · "))
                     .font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(3)
-            }
-
-            Text("…then").font(.subheadline.weight(.medium))
-            Picker("Action", selection: $rule.action) {
-                ForEach(RuleAction.allCases) { Text($0.label).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-
-            switch rule.action {
-            case .proxy:
-                Text("Send the connection through this proxy server.")
-                    .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Picker("Type", selection: $rule.proxyKind) {
-                        ForEach(ProxyKind.allCases) { Text($0.label).tag($0) }
-                    }
-                    .frame(width: 150)
-                    TextField("Proxy host, e.g. 127.0.0.1", text: $rule.proxyHost).textFieldStyle(.roundedBorder)
-                    Text(":")
-                    TextField("Port", value: $rule.proxyPort, format: .number.grouping(.never))
-                        .textFieldStyle(.roundedBorder).frame(width: 80)
-                }
-                if !rule.isProxyHostValid {
-                    Label("The proxy host or port is not valid, so this rule is skipped.", systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(.red)
-                }
-                Toggle("If the proxy cannot be reached, connect directly instead", isOn: $rule.fallbackDirect)
-            case .direct:
-                Text("Connect directly, without any proxy. Put this above a broader rule to make exceptions — for example, send *.google.com through a proxy but keep accounts.google.com direct.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            case .interface:
-                Text("Connect directly, but force the traffic out of the chosen network interface (for example a VPN tunnel or a second network adapter). This adds entries to the system routing table, affects every app, and asks for your administrator password.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Picker("Interface", selection: $rule.interfaceName) {
-                        Text("Choose…").tag("")
-                        ForEach(interfaces) { Text($0.label).tag($0.name) }
-                        if !rule.interfaceName.isEmpty && !interfaces.contains(where: { $0.name == rule.interfaceName }) {
-                            Text("\(rule.interfaceName) (not connected)").tag(rule.interfaceName)
-                        }
-                    }
-                    TextField("Gateway (leave empty for automatic)", text: $rule.gateway)
-                        .textFieldStyle(.roundedBorder).frame(width: 240)
-                }
-                Text("Works with IPs, ranges, CIDRs and exact host names (looked up when the rule is applied). Wildcard domains such as *.google.com cannot become routes.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .help("How each line was understood")
             }
         }
-        .padding(.vertical, 6)
-        .opacity(rule.enabled ? 1 : 0.55)
+    }
+}
+
+struct InterfacePicker: View {
+    @Binding var selection: String
+    let interfaces: [NetInterface]
+
+    var body: some View {
+        Picker("Interface", selection: $selection) {
+            Text("System default").tag("")
+            Divider()
+            ForEach(interfaces) { Text($0.label).tag($0.name) }
+            if !selection.isEmpty && !interfaces.contains(where: { $0.name == selection }) {
+                Text("\(selection) (not connected)").tag(selection)
+            }
+        }
     }
 }
 

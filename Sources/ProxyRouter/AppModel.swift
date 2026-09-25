@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import ServiceManagement
+import Network
 
 enum SidebarItem: Hashable {
     case profile(UUID)
@@ -28,8 +29,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var interfaces: [NetInterface] = []
     @Published private(set) var effectiveProxy: [String] = []
     @Published private(set) var appliedRoutes: [RouteEntry] = []
-    @Published private(set) var routeWarnings: [String] = []
+    @Published private(set) var routeWarnings: [RouteWarning] = []
     @Published private(set) var routesPending = false
+    /// Why the last route change did not go through (password prompt cancelled, route command failed)
+    @Published private(set) var routeIssue: String?
     @Published private(set) var busy = false
     @Published private(set) var log: [LogLine] = []
     @Published var serverRunning = false
@@ -45,8 +48,17 @@ final class AppModel: ObservableObject {
     private var saveTask: Task<Void, Never>?
     private var applyDebounce: Task<Void, Never>?
     private var applyChain: Task<Void, Never>?
+    private let pathMonitor = NWPathMonitor()
+    private var networkChangeTask: Task<Void, Never>?
 
     var anyActive: Bool { profiles.contains { $0.isActive } }
+    /// Routes on the system do not match the rules (not applied yet, or permission refused)
+    var routesNeedAttention: Bool { routesPending || routeIssue != nil }
+
+    /// true when the profile has routed rules and the routes are not in the state they should be
+    func routesNeedAttention(_ p: Profile) -> Bool {
+        routesNeedAttention && p.rules.contains { $0.enabled && $0.usesInterface }
+    }
     var pacBaseURL: String { "http://127.0.0.1:\(settings.pacPort)" }
     var primaryService: ServiceStatus? { services.first { $0.isPrimary } }
 
@@ -83,15 +95,22 @@ final class AppModel: ObservableObject {
         server.onEvent = { [weak self] msg in Task { @MainActor in self?.addLog(msg, error: true) } }
         startServer()
 
+        // follow Wi-Fi / Ethernet / VPN changes so "network in use" profiles move with it
+        pathMonitor.pathUpdateHandler = { [weak self] _ in Task { @MainActor in self?.networkChanged() } }
+        pathMonitor.start(queue: DispatchQueue(label: "proxyrouter.path"))
+
         Task {
             await refreshStatus()
             if isFirstLaunch { createSampleProfile() }
-            enqueueApply(routes: false)
+            // routes of profiles that are already on are added right away instead of waiting as pending
+            enqueueApply(routes: anyActive)
         }
     }
 
     func shutdown() {
         isShuttingDown = true
+        pathMonitor.cancel()
+        networkChangeTask?.cancel()
         applyDebounce?.cancel()
         flushSave()
         guard settings.restoreOnQuit else { return }
@@ -150,6 +169,13 @@ final class AppModel: ObservableObject {
         applyNow()
     }
 
+    /// A rule of an active profile started or stopped using an interface: try the routes right
+    /// away (asks for the password) instead of leaving them pending
+    func routingChanged(in id: UUID) {
+        guard profiles.first(where: { $0.id == id })?.isActive == true else { return }
+        applyNow()
+    }
+
     func deactivateAll() {
         for i in profiles.indices { profiles[i].isActive = false }
         applyNow()
@@ -158,7 +184,6 @@ final class AppModel: ObservableObject {
     @discardableResult
     func addProfile() -> UUID {
         var p = Profile(name: "New Profile")
-        if let prim = primaryService?.name { p.services = [prim] }
         p.rules = [Rule()]
         profiles.append(p)
         selection = .profile(p.id)
@@ -184,7 +209,6 @@ final class AppModel: ObservableObject {
 
     private func createSampleProfile() {
         var p = Profile(name: "Example: Google via local proxy")
-        if let prim = primaryService?.name { p.services = [prim] }
         var r = Rule()
         r.name = "Google ranges"
         r.targets = "142.250.0.0/15\n172.217.0.0/16\n216.58.192.0 - 216.58.223.255\n8.8.8.8\n*.google.com"
@@ -197,6 +221,7 @@ final class AppModel: ObservableObject {
     func importProfile(from st: ServiceStatus) {
         var p = Profile(name: "Imported from \(st.name)")
         p.services = [st.name]
+        p.followPrimary = false
         let bypass = st.bypass.joined(separator: "\n")
         if !bypass.isEmpty {
             var r = Rule()
@@ -255,8 +280,13 @@ final class AppModel: ObservableObject {
         return "/pac/\(slug).pac"
     }
 
+    /// Whether the profile's proxy rules are applied to the given network service
+    func appliesTo(_ p: Profile, service: String) -> Bool {
+        p.services.contains(service) || (p.followPrimary && primaryService?.name == service)
+    }
+
     func pacContent(for service: String) -> String? {
-        let ps = profiles.filter { $0.isActive && $0.services.contains(service) }
+        let ps = profiles.filter { $0.isActive && appliesTo($0, service: service) }
         return ps.isEmpty ? nil : PACGenerator.generate(profiles: ps, title: service)
     }
 
@@ -322,6 +352,7 @@ final class AppModel: ObservableObject {
         let want = Set(plan.routes), have = Set(runtime.appliedRoutes)
         if want == have && !(force && !want.isEmpty) {
             routesPending = false
+            routeIssue = nil
         } else if includeRoutes {
             await applyRoutes(remove: have.subtracting(want), add: force ? want : want.subtracting(have), final: plan.routes)
         } else {
@@ -348,6 +379,7 @@ final class AppModel: ObservableObject {
         let r = await Task.detached { Shell.runPrivileged(sh) }.value
         if r.userCancelled {
             routesPending = true
+            routeIssue = "Administrator permission was not given, so the routes were not changed."
             addLog("Route changes were cancelled (no password entered)", error: true)
             return
         }
@@ -356,9 +388,28 @@ final class AppModel: ObservableObject {
         routesPending = false
         saveRuntime()
         if r.ok {
+            routeIssue = nil
             addLog("Routes updated: \(add.count) added, \(remove.count) removed")
         } else {
-            addLog("Some routes could not be added: \(r.err.trimmingCharacters(in: .whitespacesAndNewlines))", error: true)
+            let err = r.err.trimmingCharacters(in: .whitespacesAndNewlines)
+            routeIssue = "Some routes could not be added" + (err.isEmpty ? "." : ": \(err)")
+            addLog("Some routes could not be added: \(err)", error: true)
+        }
+    }
+
+    private func networkChanged() {
+        guard !isShuttingDown else { return }
+        networkChangeTask?.cancel()
+        networkChangeTask = Task {
+            // several events arrive while a network comes up; act once it has settled
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled, !isShuttingDown else { return }
+            let before = primaryService?.name
+            await refreshStatus()
+            let now = primaryService?.name
+            guard now != before else { return }
+            addLog("Network in use is now \(now ?? "none")")
+            enqueueApply(routes: false)
         }
     }
 
@@ -439,6 +490,17 @@ final class AppModel: ObservableObject {
         if let data = try? enc.encode(ConfigFile(profiles: profiles, settings: settings)) {
             try? data.write(to: Self.configURL, options: .atomic)
         }
+    }
+
+    /// "Profile / rule" label for messages about a rule
+    func ruleLabel(_ ruleID: UUID) -> String {
+        for p in profiles {
+            if let i = p.rules.firstIndex(where: { $0.id == ruleID }) {
+                let r = p.rules[i]
+                return "\(p.name) / \(r.name.isEmpty ? "rule #\(i + 1)" : r.name)"
+            }
+        }
+        return "Rule"
     }
 
     func addLog(_ text: String, error: Bool = false) {

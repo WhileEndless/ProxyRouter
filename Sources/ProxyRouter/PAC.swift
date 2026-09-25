@@ -33,12 +33,17 @@ enum PACGenerator {
         for p in profiles {
             l.append("")
             l.append("  // Profile: \(safe(p.name))")
+            // excluded destinations skip this profile and fall through to the next one
+            let excl = condition(specs: p.parsedExcludes.compactMap(\.spec))
+            let pad = excl == nil ? "  " : "    "
+            if let excl { l.append("  if (!(\(excl))) {") }
             for r in p.rules where r.enabled {
                 if r.action == .proxy && !r.isProxyHostValid { continue }
                 guard let cond = condition(for: r) else { continue }
-                l.append("  // \(safe(r.name.isEmpty ? "rule" : r.name)) → \(safe(r.actionSummary))")
-                l.append("  if (\(cond)) return \"\(r.pacResult)\";")
+                l.append("\(pad)// \(safe(r.name.isEmpty ? "rule" : r.name)) → \(safe(r.actionSummary))")
+                l.append("\(pad)if (\(cond)) return \"\(r.pacResult)\";")
             }
+            if excl != nil { l.append("  }") }
         }
         l.append("")
         l.append("  return \"DIRECT\";")
@@ -47,7 +52,10 @@ enum PACGenerator {
     }
 
     static func condition(for rule: Rule) -> String? {
-        let specs = rule.parsedTargets.compactMap(\.spec)
+        condition(specs: rule.parsedTargets.compactMap(\.spec))
+    }
+
+    static func condition(specs: [TargetSpec]) -> String? {
         guard !specs.isEmpty else { return nil }
         var parts: [String] = []
         var ranges: [(UInt32, UInt32)] = []
@@ -82,6 +90,8 @@ struct Evaluation {
     var matchedTarget: String?
     var result: String
     var action: String
+    /// Profiles skipped because the destination is on their exclude list
+    var excludedBy: [String] = []
 }
 
 enum Evaluator {
@@ -100,7 +110,12 @@ enum Evaluator {
             return v
         }
 
+        var excludedBy: [String] = []
         for p in profiles {
+            if let ex = p.exclusion(host: host, ip: ip) {
+                excludedBy.append("\(p.name) (\(ex.description))")
+                continue
+            }
             for r in p.rules where r.enabled {
                 if r.action == .proxy && !r.isProxyHostValid { continue }
                 for t in r.parsedTargets {
@@ -112,12 +127,13 @@ enum Evaluator {
                         return Evaluation(host: host, resolvedIP: resolved, profileName: p.name,
                                           ruleName: r.name.isEmpty ? nil : r.name,
                                           matchedTarget: spec.description, result: r.pacResult,
-                                          action: r.actionSummary)
+                                          action: r.actionSummary, excludedBy: excludedBy)
                     }
                 }
             }
         }
-        return Evaluation(host: host, resolvedIP: resolved, result: "DIRECT", action: "No rule matched → DIRECT")
+        return Evaluation(host: host, resolvedIP: resolved, result: "DIRECT", action: "No rule matched → DIRECT",
+                          excludedBy: excludedBy)
     }
 
     static func extractHost(_ s: String) -> String {

@@ -27,7 +27,7 @@ binary into an `.app` bundle with `Resources/Info.plist` and signs it ad hoc.
 | `Sources/ProxyRouter/AppModel.swift` | State, persistence, applying and restoring settings |
 | `Sources/ProxyRouter/Models.swift` | Profiles, rules, target parsing, tolerant decoding |
 | `Sources/ProxyRouter/PAC.swift` | PAC generation, the local PAC server, the test evaluator |
-| `Sources/ProxyRouter/Routes.swift` | Planning routes for "Route via interface" rules |
+| `Sources/ProxyRouter/Routes.swift` | Planning routes for rules with an "Out through" interface |
 | `Sources/ProxyRouter/System.swift` | IPv4 helpers, DNS, interfaces, shell and SystemConfiguration access |
 | `Sources/ProxyRouter/AppInfo.swift` | Name, version, license and the About window |
 | `Sources/ProxyRouter/Views/` | SwiftUI screens |
@@ -38,6 +38,8 @@ binary into an `.app` bundle with `Resources/Info.plist` and signs it ad hoc.
 - The configuration file belongs to the user. Never overwrite it with defaults.
 - New fields must have defaults and be decoded with `c.value(.key, default)` in the
   `init(from:)` extensions in `Models.swift`, so older files keep loading.
+- When a field changes meaning, write it under a new key and read the old keys through a
+  separate container (see `Rule.LegacyKeys`), so old files are migrated instead of misread.
 - The example profile is only created on the very first launch.
 - If you change the meaning of an existing field, bump `ConfigFile.currentVersion` and
   migrate old values explicitly.
@@ -72,7 +74,7 @@ There is no automated test suite yet. Before opening a pull request:
 3. Use **Test an Address** to check matching for IPs, ranges and domains.
 4. Quit the app from the menu and with `kill <pid>`; the network must return to its
    previous proxy settings.
-5. If you touched routes: add a "Route via interface" rule, apply it, check
+5. If you touched routes: add a rule with an "Out through" interface, apply it, check
    `netstat -rn -f inet`, then turn the profile off and confirm the route is gone.
 
 ## Commits and releases

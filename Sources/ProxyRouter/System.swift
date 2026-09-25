@@ -28,6 +28,21 @@ enum IPv4 {
         }
         return out
     }
+
+    /// Removes the `excluded` ranges from `ranges`
+    static func subtract(_ ranges: [(UInt32, UInt32)], _ excluded: [(UInt32, UInt32)]) -> [(UInt32, UInt32)] {
+        var out = ranges
+        for (elo, ehi) in excluded {
+            out = out.flatMap { (lo, hi) -> [(UInt32, UInt32)] in
+                if ehi < lo || elo > hi { return [(lo, hi)] }
+                var parts: [(UInt32, UInt32)] = []
+                if elo > lo { parts.append((lo, elo - 1)) }
+                if ehi < hi { parts.append((ehi + 1, hi)) }
+                return parts
+            }
+        }
+        return out
+    }
 }
 
 enum DNS {

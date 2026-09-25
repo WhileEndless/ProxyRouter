@@ -4,6 +4,33 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- "Out through" interface on every rule. Direct rules route their destinations through it;
+  proxy rules route their destinations too (so a proxy running on this Mac connects to them
+  through that interface) and, for a remote proxy, the proxy server as well.
+- Per-profile **Exceptions** list: matching destinations skip the profile in the PAC file, in
+  the Test screen and when routes are built; excluded IP ranges are cut out of route ranges.
+- **Network in use** option (on by default, also for existing profiles): proxy rules are
+  applied to whichever network macOS is using and follow it when the network changes. Fixed
+  networks can still be added on top.
+- Warning in the profile editor when "Network in use" is off and the network macOS is using
+  is not selected.
+- Route problems are shown under the rule they belong to; pending route changes can be applied
+  from the profile editor.
+- Picking an interface or switching a routed rule on/off in an active profile applies the
+  routes right away. If the password prompt is cancelled, a persistent warning with a
+  **Try Again** button is shown in the editor, sidebar, toolbar and menu bar.
+
+### Changed
+- "Route via interface" is no longer a separate action; existing rules become Direct rules with
+  an "Out through" interface. Configurations are migrated automatically.
+- Redesigned rule editor: labelled rows, gateway moved under a disclosure arrow; the list of
+  specific networks is collapsed by default.
+- Routes of profiles that are active at launch are applied right away instead of waiting as
+  pending changes.
+
 ## [0.1.0] - 2026-09-23
 
 First public release.

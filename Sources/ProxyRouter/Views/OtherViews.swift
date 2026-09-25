@@ -38,6 +38,7 @@ struct TestView: View {
                     row("Profile", r.profileName ?? "—")
                     row("Rule", r.ruleName ?? (r.profileName == nil ? "—" : "(unnamed)"))
                     row("Matched target", r.matchedTarget ?? "—")
+                    if !r.excludedBy.isEmpty { row("Excluded by", r.excludedBy.joined(separator: ", ")) }
                     row("Outcome", r.action)
                     row("PAC returns", r.result)
                 }
@@ -54,7 +55,7 @@ struct TestView: View {
 
     private func run() {
         let profiles = model.profiles.filter { p in
-            (!onlyActive || p.isActive) && (service.isEmpty || p.services.contains(service) || p.rules.contains { $0.action == .interface })
+            (!onlyActive || p.isActive) && (service.isEmpty || model.appliesTo(p, service: service) || p.rules.contains { $0.action == .direct && $0.usesInterface })
         }
         let text = input
         running = true
@@ -128,7 +129,7 @@ struct SettingsView: View {
 
             Section("Good to know") {
                 Text("• Proxy rules are followed by apps that use the macOS proxy settings, such as Safari, Chrome and most Mac apps. Command-line tools like curl ignore them.")
-                Text("• “Route via interface” rules change the system routing table, so they apply to every app, including command-line tools.")
+                Text("• Rules with an “Out through” interface change the system routing table, so they apply to every app, including command-line tools.")
                 Text("• If another program (for example a VPN client) already has a route for the same network, this app replaces it while the profile is on.")
             }
             .font(.callout)

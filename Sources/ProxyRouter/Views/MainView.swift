@@ -13,11 +13,12 @@ struct MainView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if model.busy { ProgressView().controlSize(.small) }
-                if model.routesPending {
+                if model.routesNeedAttention {
                     Button { model.applyNow() } label: {
-                        Label("Apply Route Changes", systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                        Label("Apply Route Changes", systemImage: "exclamationmark.triangle.fill")
                     }
-                    .help("Some “Route via interface” rules changed but are not applied yet. Applying them asks for your administrator password.")
+                    .foregroundStyle(model.routeIssue != nil ? .red : .orange)
+                    .help(model.routeIssue ?? "Some interface routes changed but are not applied yet. Applying them asks for your administrator password.")
                 }
                 Button { model.applyNow(force: true) } label: {
                     Label("Reapply Everything", systemImage: "arrow.clockwise")
@@ -67,6 +68,12 @@ private struct Sidebar: View {
                             Text(p.name.isEmpty ? "Untitled" : p.name).lineLimit(1)
                             Text(subtitle(p)).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                         }
+                        if model.routesNeedAttention(p) {
+                            Spacer()
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(model.routeIssue != nil ? .red : .orange)
+                                .help(model.routeIssue ?? "Route changes are not applied yet")
+                        }
                     }
                     .tag(SidebarItem.profile(p.id))
                     .contextMenu {
@@ -114,7 +121,8 @@ private struct Sidebar: View {
 
     private func subtitle(_ p: Profile) -> String {
         let rules = p.rules.filter(\.enabled).count
-        let svc = p.services.isEmpty ? "no network selected" : p.services.joined(separator: ", ")
+        let names = (p.followPrimary ? ["network in use"] : []) + p.services
+        let svc = names.isEmpty ? "no network selected" : names.joined(separator: ", ")
         return "\(rules) rule\(rules == 1 ? "" : "s") · \(svc)"
     }
 }

@@ -10,9 +10,9 @@ struct ProxyRouterApp: App {
         MenuBarExtra {
             MenuContent().environmentObject(model)
         } label: {
-            Image(systemName: "arrow.triangle.branch")
+            Image(systemName: model.routesNeedAttention ? "exclamationmark.triangle.fill" : "arrow.triangle.branch")
                 .symbolRenderingMode(.hierarchical)
-                .opacity(model.anyActive ? 1 : 0.5)
+                .opacity(model.anyActive || model.routesNeedAttention ? 1 : 0.5)
         }
 
         Window("ProxyRouter", id: "main") {
@@ -69,9 +69,11 @@ struct MenuContent: View {
             ))
         }
 
-        if model.routesPending {
+        if model.routesNeedAttention {
             Divider()
-            Button("Apply Pending Route Changes…") { model.applyNow() }
+            Label(model.routeIssue != nil ? "Routes are not applied" : "Route changes are waiting",
+                  systemImage: "exclamationmark.triangle.fill")
+            Button(model.routeIssue != nil ? "Try Again…" : "Apply Route Changes…") { model.applyNow() }
         }
 
         Divider()
