@@ -14,7 +14,7 @@ is turned off or the app quits.
 - Keep specific addresses out of a profile with an exception list.
 - See at a glance what proxy settings macOS is actually using right now.
 
-Current version: **0.1.0** — see the [changelog](CHANGELOG.md).
+Current version: **0.2.0** — see the [changelog](CHANGELOG.md).
 
 ---
 
